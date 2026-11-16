@@ -1294,8 +1294,11 @@ def cmd_check(args):
                 problems.append(T(f"{name} 已于 {exp} 过期", f"{name} expired on {exp}"))
             elif days <= 30:
                 problems.append(T(f"{name} 还有 {days} 天到期（{exp}）", f"{name} expires in {days} days ({exp})"))
+    def family(n):  # 挂在同一个主条目下的算一家；一家人共用一个值（如同一个应用的两套变量名）是故意的，不报
+        g = meta_of(lines, entries[n]).get("group")
+        return g if g in entries else n
     for names in seen.values():
-        if len(names) > 1:
+        if len(names) > 1 and len({family(n) for n in names}) > 1:
             problems.append(T(f"{' 和 '.join(names)} 的值完全一样，确认是不是存重了",
                               f"{' and '.join(names)} have identical values; check for duplicates"))
     for path in SCAN_FILES:

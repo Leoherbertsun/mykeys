@@ -30,6 +30,8 @@ Prefer the variable name from the provider's docs; many SDKs read it automatical
 
 For keys that only work in pairs (`ACCESS_KEY` + `SECRET_KEY`), keep both as secrets but attach the minor one to the other so they show up as one group.
 
+If you deliberately keep one value under two names (say, two scripts expect different variable names), attach one to the other and `key check` stops flagging it as a duplicate.
+
 ## 4. Notes worth keeping
 
 | Field | When |
