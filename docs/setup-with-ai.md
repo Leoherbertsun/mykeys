@@ -29,18 +29,18 @@ key scan ~/projects ~/code     # 再查用户说的项目目录里的 .env 文�
 
 ## 第 3 步：收进来，并起好名字
 
-按 [存储约定](conventions.md) 起名、分类，然后逐条导入：
+按 [存储约定](conventions.md) 起名，然后逐条导入。常见平台会按名字自动补上平台、网址和分类（`key catalog` 可查），不用你填：
 
 ```bash
-key import ~/.zshrc OPENAI_API_KEY --section 大模型 \
-  --meta platform=OpenAI --meta url=https://platform.openai.com/api-keys --meta purpose=…
+key import ~/.zshrc OPENAI_API_KEY --meta purpose='我的脚本里对话用'
 key import ~/.claude.json Authorization --as EXAMPLE_TOKEN   # 去掉 "Bearer " 前缀会自动处理
 ```
 
-接口地址、地域、存储桶名、用户名这类**不是秘密的配置**，存成配置并挂到所属密钥下：
+接口地址、地域、存储桶名、用户名这类**不是秘密的配置**，名字以 `_BASE_URL`、`_REGION` 等结尾的会自动标成配置并挂到同前缀的密钥下；其他的手动指定：
 
 ```bash
-key import ~/.zshrc OPENAI_BASE_URL --kind config --group OPENAI_API_KEY
+key import ~/.zshrc OPENAI_BASE_URL                                  # 自动：配置，挂到 OPENAI_API_KEY
+key import ~/.zshrc MY_SERVER --kind config --group MY_SERVER_TOKEN  # 手动指定
 ```
 
 同一个值在多处出现时只收一次。`key check` 会提示值完全相同的两个名字，请用户确认是不是存重了。

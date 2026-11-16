@@ -17,18 +17,18 @@ struct MyKeysApp: App {
         .defaultSize(width: 1240, height: 720)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("添加密钥…") { NotificationCenter.default.post(name: .addKey, object: nil) }
+                Button(L("添加密钥…", "Add Key…")) { NotificationCenter.default.post(name: .addKey, object: nil) }
                     .keyboardShortcut("n")
             }
-            CommandMenu("密钥") {
-                Button("刷新") { Task { await store.reload() } }
+            CommandMenu(L("密钥", "Keys")) {
+                Button(L("刷新", "Refresh")) { Task { await store.reload() } }
                     .keyboardShortcut("r")
-                Button("立即备份到 iCloud") { Task { await store.backupNow() } }
-                Button("在访达中显示密钥文件") {
+                Button(L("立即备份到 iCloud", "Back Up to iCloud Now")) { Task { await store.backupNow() } }
+                Button(L("在访达中显示密钥文件", "Show Keys File in Finder")) {
                     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: store.keysFilePath)])
                 }
                 Divider()
-                Button("锁定") { lock.lock() }
+                Button(L("锁定", "Lock")) { lock.lock() }
                     .keyboardShortcut("l")
             }
         }
@@ -78,12 +78,13 @@ struct LockView: View {
                 .font(.system(size: 54, weight: .semibold))
                 .foregroundStyle(.tint)
             Text("My Keys").font(.largeTitle.weight(.semibold))
-            Text("你的 API 密钥都在这里。用 Touch ID 或开机密码解锁。")
+            Text(L("你的 API 密钥都在这里。用 Touch ID 或开机密码解锁。",
+                   "All your API keys in one place. Unlock with Touch ID or your login password."))
                 .foregroundStyle(.secondary)
             Button {
                 lock.unlock()
             } label: {
-                Label("解锁", systemImage: "touchid").frame(minWidth: 120)
+                Label(L("解锁", "Unlock"), systemImage: "touchid").frame(minWidth: 120)
             }
             .controlSize(.large)
             .buttonStyle(.borderedProminent)

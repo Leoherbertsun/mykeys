@@ -27,7 +27,7 @@ enum SelfCheck {
             await wait(1.5)
             snap("3-显示值")
             post(setFilter, "expiring")
-            post(selectKey, "OLD_TOKEN")
+            post(selectKey, store.topLevel.last { $0.isExpiringSoon }?.name)
             await wait(1)
             snap("4-快到期")
             post(setFilter, "all")
@@ -41,7 +41,7 @@ enum SelfCheck {
             // 通过 App 自己的读写通道走一遍：录入 → 改说明 → 挂配置 → 换新值 → 拦坏值 → 删除
             var log: [String] = []
             @MainActor func item(_ n: String) -> KeyItem? { store.items.first { $0.name == n } }
-            let e1 = await store.add(name: "SELFCHECK_KEY", value: "sk-selfcheck-111111", section: "搜索",
+            let e1 = await store.add(name: "SELFCHECK_KEY", value: "sk-selfcheck-111111", section: store.sections.first { KeyCatalog.keywordHit("search", $0) || $0.contains("搜索") } ?? "Search",
                                      meta: ["platform": "测试平台", "account": "me@example.com", "note": "带 空格 的备注"])
             log.append("录入：\(e1 ?? "成功")；分类：\(item("SELFCHECK_KEY")?.section ?? "无")")
             let ok = await store.saveMeta("SELFCHECK_KEY", changes: ["purpose": "自查用", "account": ""])

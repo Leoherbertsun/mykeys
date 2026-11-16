@@ -17,8 +17,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import plistlib
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOME = os.path.expanduser("~")
 SECRETS_DIR = os.environ.get("KEY_DIR", os.path.join(HOME, ".config", "secrets"))
 KEYS = os.environ.get("KEY_FILE", os.path.join(SECRETS_DIR, "keys.env"))
@@ -42,16 +43,37 @@ def _config():
 CONFIG = _config()
 
 
+def _detect_lang():
+    """界面语言：MYKEYS_LANG > config.json 的 lang > macOS 系统首选语言 > LANG。中文以外一律用英文。"""
+    v = os.environ.get("MYKEYS_LANG") or CONFIG.get("lang")
+    if not v:
+        try:
+            with open(os.path.join(HOME, "Library", "Preferences", ".GlobalPreferences.plist"), "rb") as fh:
+                v = (plistlib.load(fh).get("AppleLanguages") or [""])[0]
+        except Exception:
+            v = os.environ.get("LC_ALL") or os.environ.get("LANG") or ""
+    return "zh" if v.lower().startswith("zh") else "en"
+
+
+LANG = _detect_lang()
+
+
+def T(zh, en):
+    """按界面语言二选一"""
+    return zh if LANG == "zh" else en
+
+
 def _path_setting(env, key, default):
     v = os.environ.get(env) or CONFIG.get(key) or default
     return os.path.expanduser(v) if v else None
 
 
 SNAP_DIR = _path_setting("KEY_SNAP_DIR", "snapshot_dir", os.path.join(STATE_DIR, "snapshots"))
-# 加密备份：配置了 backup_dir 就用它；否则有 iCloud 云盘时默认放“iCloud 云盘/MyKeys 备份”；都没有就不备份
+# 加密备份：配置了 backup_dir 就用它；否则有 iCloud 云盘时默认放“iCloud 云盘/MyKeys 备份”（英文系统叫 My Keys Backup）；都没有就不备份
 BACKUP_DIR = _path_setting("KEY_BACKUP_DIR", "backup_dir",
-                           os.path.join(ICLOUD, "MyKeys 备份") if os.path.isdir(ICLOUD) else None)
-BACKUP_NAME = "密钥备份.dmg"
+                           os.path.join(ICLOUD, T("MyKeys 备份", "My Keys Backup")) if os.path.isdir(ICLOUD) else None)
+BACKUP_NAME = CONFIG.get("backup_name") or T("密钥备份.dmg", "My Keys Backup.dmg")
+BACKUP_LABEL = T("My Keys 备份密码", "My Keys backup password")
 KC_SERVICE = os.environ.get("KEY_KC_SERVICE", CONFIG.get("keychain_service", "key-backup"))
 SNAP_KEEP = 5
 NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
@@ -66,10 +88,168 @@ LABELS = {"platform": "平台", "url": "网址", "account": "账号", "purpose":
 ALIASES = dict({v: k for k, v in LABELS.items()}, **{"来源": "url", "source": "url"})
 KINDS = {"secret": "secret", "密钥": "secret", "config": "config", "配置": "config"}
 
+# 通用分类：id -> (中文名, 英文名, 匹配已有分类名用的关键词)
+CATEGORIES = {
+    "ai": ("大模型", "AI Models", ("模型", "llm", "ai", "model")),
+    "search": ("搜索", "Search", ("搜索", "search")),
+    "data": ("数据", "Data", ("数据", "data", "金融", "finance")),
+    "cloud": ("云服务与开发", "Cloud & Dev", ("云", "cloud", "开发", "dev", "部署", "deploy")),
+    "db": ("数据库", "Databases", ("数据库", "database", "db")),
+    "comms": ("消息通知", "Messaging", ("消息", "通知", "messag", "chat", "notif")),
+    "payment": ("支付", "Payments", ("支付", "pay", "billing")),
+    "other": ("工具与服务", "Tools & Services", ("工具", "服务", "tool", "service", "other", "其他")),
+}
+
+# 常见平台目录：变量名前缀 -> (平台, 管理密钥的网址, 分类)。录入时用来自动补说明，猜不中也不影响使用
+CATALOG = [
+    ("OPENAI_", "OpenAI", "https://platform.openai.com/api-keys", "ai"),
+    ("ANTHROPIC_", "Anthropic", "https://console.anthropic.com/settings/keys", "ai"),
+    ("CLAUDE_", "Anthropic", "https://console.anthropic.com/settings/keys", "ai"),
+    ("GEMINI_", "Google AI Studio", "https://aistudio.google.com/apikey", "ai"),
+    ("GOOGLE_AI_", "Google AI Studio", "https://aistudio.google.com/apikey", "ai"),
+    ("DEEPSEEK_", "DeepSeek", "https://platform.deepseek.com/api_keys", "ai"),
+    ("XAI_", "xAI (Grok)", "https://console.x.ai", "ai"),
+    ("GROK_", "xAI (Grok)", "https://console.x.ai", "ai"),
+    ("MISTRAL_", "Mistral", "https://console.mistral.ai/api-keys", "ai"),
+    ("GROQ_", "Groq", "https://console.groq.com/keys", "ai"),
+    ("OPENROUTER_", "OpenRouter", "https://openrouter.ai/settings/keys", "ai"),
+    ("TOGETHER_", "Together AI", "https://api.together.ai/settings/api-keys", "ai"),
+    ("FIREWORKS_", "Fireworks AI", "https://fireworks.ai/account/api-keys", "ai"),
+    ("PERPLEXITY_", "Perplexity", "https://www.perplexity.ai/settings/api", "ai"),
+    ("COHERE_", "Cohere", "https://dashboard.cohere.com/api-keys", "ai"),
+    ("REPLICATE_", "Replicate", "https://replicate.com/account/api-tokens", "ai"),
+    ("HF_", "Hugging Face", "https://huggingface.co/settings/tokens", "ai"),
+    ("HUGGINGFACE_", "Hugging Face", "https://huggingface.co/settings/tokens", "ai"),
+    ("ELEVENLABS_", "ElevenLabs", "https://elevenlabs.io/app/settings/api-keys", "ai"),
+    ("MOONSHOT_", "Moonshot (Kimi)", "https://platform.moonshot.cn/console/api-keys", "ai"),
+    ("KIMI_", "Moonshot (Kimi)", "https://platform.moonshot.cn/console/api-keys", "ai"),
+    ("DASHSCOPE_", "阿里云百炼 (DashScope)", "https://bailian.console.aliyun.com", "ai"),
+    ("QWEN_", "阿里云百炼 (DashScope)", "https://bailian.console.aliyun.com", "ai"),
+    ("ZHIPU_", "智谱 GLM", "https://open.bigmodel.cn/usercenter/apikeys", "ai"),
+    ("ZAI_", "智谱 GLM / Z.ai", "https://open.bigmodel.cn/usercenter/apikeys", "ai"),
+    ("GLM_", "智谱 GLM", "https://open.bigmodel.cn/usercenter/apikeys", "ai"),
+    ("MINIMAX_", "MiniMax", "https://platform.minimaxi.com", "ai"),
+    ("SILICONFLOW_", "SiliconFlow", "https://cloud.siliconflow.cn/account/ak", "ai"),
+    ("ARK_", "火山方舟 (Volcengine Ark)", "https://console.volcengine.com/ark", "ai"),
+    ("VOLC_", "火山引擎 (Volcengine)", "https://console.volcengine.com/iam/keymanage", "cloud"),
+    ("BAIDU_", "百度智能云", "https://console.bce.baidu.com/iam/#/iam/accesslist", "ai"),
+    ("TAVILY_", "Tavily", "https://app.tavily.com", "search"),
+    ("SERPAPI_", "SerpApi", "https://serpapi.com/manage-api-key", "search"),
+    ("SERPER_", "Serper", "https://serper.dev/api-key", "search"),
+    ("EXA_", "Exa", "https://dashboard.exa.ai/api-keys", "search"),
+    ("BRAVE_", "Brave Search", "https://api-dashboard.search.brave.com/app/keys", "search"),
+    ("FIRECRAWL_", "Firecrawl", "https://www.firecrawl.dev/app/api-keys", "search"),
+    ("JINA_", "Jina AI", "https://jina.ai/api-dashboard", "search"),
+    ("BING_", "Bing Search", "https://portal.azure.com", "search"),
+    ("GITHUB_", "GitHub", "https://github.com/settings/tokens", "cloud"),
+    ("GH_", "GitHub", "https://github.com/settings/tokens", "cloud"),
+    ("GITLAB_", "GitLab", "https://gitlab.com/-/user_settings/personal_access_tokens", "cloud"),
+    ("NPM_", "npm", "https://www.npmjs.com/settings/~/tokens", "cloud"),
+    ("VERCEL_", "Vercel", "https://vercel.com/account/tokens", "cloud"),
+    ("NETLIFY_", "Netlify", "https://app.netlify.com/user/applications", "cloud"),
+    ("CLOUDFLARE_", "Cloudflare", "https://dash.cloudflare.com/profile/api-tokens", "cloud"),
+    ("CF_", "Cloudflare", "https://dash.cloudflare.com/profile/api-tokens", "cloud"),
+    ("AWS_", "AWS", "https://console.aws.amazon.com/iam/home#/security_credentials", "cloud"),
+    ("AZURE_", "Microsoft Azure", "https://portal.azure.com", "cloud"),
+    ("GCP_", "Google Cloud", "https://console.cloud.google.com/apis/credentials", "cloud"),
+    ("GOOGLE_", "Google Cloud", "https://console.cloud.google.com/apis/credentials", "cloud"),
+    ("TENCENT_", "腾讯云 (Tencent Cloud)", "https://console.cloud.tencent.com/cam/capi", "cloud"),
+    ("QCLOUD_", "腾讯云 (Tencent Cloud)", "https://console.cloud.tencent.com/cam/capi", "cloud"),
+    ("ALIYUN_", "阿里云 (Alibaba Cloud)", "https://ram.console.aliyun.com/manage/ak", "cloud"),
+    ("ALIBABA_CLOUD_", "阿里云 (Alibaba Cloud)", "https://ram.console.aliyun.com/manage/ak", "cloud"),
+    ("DOCKER_", "Docker Hub", "https://app.docker.com/settings/personal-access-tokens", "cloud"),
+    ("SENTRY_", "Sentry", "https://sentry.io/settings/account/api/auth-tokens/", "cloud"),
+    ("SUPABASE_", "Supabase", "https://supabase.com/dashboard/project/_/settings/api", "db"),
+    ("NEON_", "Neon", "https://console.neon.tech/app/settings/api-keys", "db"),
+    ("PLANETSCALE_", "PlanetScale", "https://app.planetscale.com", "db"),
+    ("MONGODB_", "MongoDB Atlas", "https://cloud.mongodb.com", "db"),
+    ("UPSTASH_", "Upstash", "https://console.upstash.com", "db"),
+    ("PINECONE_", "Pinecone", "https://app.pinecone.io", "db"),
+    ("DATABASE_", "", "", "db"),
+    ("POSTGRES_", "PostgreSQL", "", "db"),
+    ("REDIS_", "Redis", "", "db"),
+    ("STRIPE_", "Stripe", "https://dashboard.stripe.com/apikeys", "payment"),
+    ("PAYPAL_", "PayPal", "https://developer.paypal.com/dashboard/applications", "payment"),
+    ("LEMONSQUEEZY_", "Lemon Squeezy", "https://app.lemonsqueezy.com/settings/api", "payment"),
+    ("SLACK_", "Slack", "https://api.slack.com/apps", "comms"),
+    ("DISCORD_", "Discord", "https://discord.com/developers/applications", "comms"),
+    ("TELEGRAM_", "Telegram", "https://t.me/BotFather", "comms"),
+    ("TWILIO_", "Twilio", "https://console.twilio.com", "comms"),
+    ("RESEND_", "Resend", "https://resend.com/api-keys", "comms"),
+    ("SENDGRID_", "SendGrid", "https://app.sendgrid.com/settings/api_keys", "comms"),
+    ("FEISHU_", "飞书 (Feishu)", "https://open.feishu.cn/app", "comms"),
+    ("LARK_", "Lark", "https://open.larksuite.com/app", "comms"),
+    ("DINGTALK_", "钉钉 (DingTalk)", "https://open-dev.dingtalk.com", "comms"),
+    ("WECOM_", "企业微信 (WeCom)", "https://work.weixin.qq.com", "comms"),
+    ("NOTION_", "Notion", "https://www.notion.so/my-integrations", "other"),
+    ("LINEAR_", "Linear", "https://linear.app/settings/account/security", "other"),
+    ("FIGMA_", "Figma", "https://www.figma.com/settings", "other"),
+    ("TUSHARE_", "TuShare", "https://tushare.pro/user/token", "data"),
+    ("FRED_", "FRED", "https://fredaccount.stlouisfed.org/apikeys", "data"),
+    ("ALPHAVANTAGE_", "Alpha Vantage", "https://www.alphavantage.co/support/#api-key", "data"),
+    ("ALPHA_VANTAGE_", "Alpha Vantage", "https://www.alphavantage.co/support/#api-key", "data"),
+    ("POLYGON_", "Polygon.io", "https://polygon.io/dashboard/api-keys", "data"),
+    ("FINNHUB_", "Finnhub", "https://finnhub.io/dashboard", "data"),
+    ("FMP_", "Financial Modeling Prep", "https://site.financialmodelingprep.com/developer/docs/dashboard", "data"),
+    ("MAPBOX_", "Mapbox", "https://account.mapbox.com/access-tokens/", "other"),
+]
+# 以这些结尾的通常是配置（接口地址、地域、编号……），不是秘密
+CONFIG_SUFFIXES = ("_BASE_URL", "_API_BASE", "_URL", "_ENDPOINT", "_HOST", "_PORT", "_REGION", "_BUCKET",
+                   "_USER", "_USERNAME", "_ORG", "_ORG_ID", "_ORGANIZATION", "_PROJECT", "_PROJECT_ID",
+                   "_APP_ID", "_CLIENT_ID", "_MODEL", "_ZONE", "_ACCOUNT_ID")
+
+
+def category_name(cid):
+    zh, en, _ = CATEGORIES[cid]
+    return T(zh, en)
+
+
+def guess(name):
+    """按名字猜平台、网址、分类；没猜到返回空字典"""
+    best = None
+    for prefix, platform, url, cat in CATALOG:
+        if name.startswith(prefix) or name == prefix.rstrip("_"):
+            if best is None or len(prefix) > len(best[0]):
+                best = (prefix, platform, url, cat)
+    if not best:
+        return {}
+    return {"platform": best[1], "url": best[2], "category": best[3]}
+
+
+def guess_parent(name, entries, lines):
+    """配置类名字（如 OPENAI_BASE_URL）找它所属的密钥：同前缀、本身是密钥的条目里前缀最长的那个"""
+    if not name.endswith(CONFIG_SUFFIXES):
+        return None
+    best = None
+    for n, e in entries.items():
+        if n == name or meta_of(lines, e).get("kind") == "config" or meta_of(lines, e).get("group"):
+            continue
+        common = os.path.commonprefix([n, name])
+        if "_" in common and common.rstrip("_") and (best is None or len(common) > best[0]):
+            best = (len(common), n)
+    return best[1] if best and best[0] >= 3 else None
+
+
+def keyword_hit(k, text):
+    """中文关键词按子串匹配；英文关键词要出现在词首，免得 ai 命中 Email"""
+    text = text.lower()
+    return k in text if not k.isascii() else re.search(r"\b" + re.escape(k), text) is not None
+
+
+def find_section(lines, cid):
+    """在文件已有的分类里找和 cid 对得上的那个名字"""
+    _, _, kws = CATEGORIES[cid]
+    for l in lines:
+        m = SECTION_RE.match(l)
+        if m and any(keyword_hit(k, m.group(1)) for k in kws):
+            return m.group(1)
+    return None
+
+
 # 认识的 AI 助手全局说明文件。目录存在才算装了这个助手
 AGENT_FILES = [
     ("Claude Code", os.path.join(HOME, ".claude"), "CLAUDE.md"),
-    ("Codex（ChatGPT）", os.path.join(HOME, ".codex"), "AGENTS.md"),
+    (T("Codex（ChatGPT）", "Codex (ChatGPT)"), os.path.join(HOME, ".codex"), "AGENTS.md"),
     ("Gemini CLI", os.path.join(HOME, ".gemini"), "GEMINI.md"),
 ]
 BLOCK_START, BLOCK_END = "<!-- mykeys:start -->", "<!-- mykeys:end -->"
@@ -83,14 +263,14 @@ SECRET_NAME_RE = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|_PAT|API|AUTHORI
 
 
 def die(msg, code=1):
-    print(f"key：{msg}", file=sys.stderr)
+    print(T("key：", "key: ") + msg, file=sys.stderr)
     sys.exit(code)
 
 
 def mask(v):
     if len(v) <= 8:
-        return "*" * len(v) + f"（{len(v)} 位）"
-    return f"{v[:4]}…{v[-3:]}（{len(v)} 位）"
+        return "*" * len(v) + T(f"（{len(v)} 位）", f" ({len(v)} chars)")
+    return f"{v[:4]}…{v[-3:]}" + T(f"（{len(v)} 位）", f" ({len(v)} chars)")
 
 
 def short(path):
@@ -105,7 +285,7 @@ SECTION_RE = re.compile(r"^#\s*=+\s*(.+?)\s*=+\s*$")
 def load():
     """返回 (lines, entries)。entries: 名字 -> {start, end, meta_line, value, section, notes}，按文件顺序。"""
     if not os.path.exists(KEYS):
-        die(f"找不到密钥文件 {short(KEYS)}。先运行 key init")
+        die(T(f"找不到密钥文件 {short(KEYS)}。先运行 key init", f"No secrets file at {short(KEYS)}. Run key init first"))
     with open(KEYS, encoding="utf-8") as fh:
         lines = fh.read().splitlines()
     entries = {}
@@ -130,7 +310,7 @@ def load():
             except ValueError:
                 j += 1
                 if j >= len(lines):
-                    die(f"第 {i + 1} 行的引号没有闭合")
+                    die(T(f"第 {i + 1} 行的引号没有闭合", f"Unclosed quote on line {i + 1}"))
                 buf += "\n" + lines[j]
         value = toks[1].split("=", 1)[1] if len(toks) > 1 else ""
         meta_line = i - 1 if i > 0 and lines[i - 1].startswith("#:") else None
@@ -184,15 +364,16 @@ def parse_assignments(items):
     out = {}
     for it in items:
         if "=" not in it:
-            die(f"“{it}”应写成 字段=值，例如 platform=DeepSeek 或 平台=DeepSeek")
+            die(T(f"“{it}”应写成 字段=值，例如 platform=DeepSeek 或 平台=DeepSeek",
+                  f"\"{it}\" should be field=value, e.g. platform=DeepSeek"))
         k, v = it.split("=", 1)
         k = canon(k)
         if not k or re.search(r"[\s=]", k):
-            die(f"字段名“{k}”不合法")
+            die(T(f"字段名“{k}”不合法", f"Invalid field name \"{k}\""))
         v = v.strip().replace("\n", " ")
         if k == "kind" and v:
             if v not in KINDS:
-                die("类型只能是 secret（密钥）或 config（配置）")
+                die(T("类型只能是 secret（密钥）或 config（配置）", "kind must be secret or config"))
             v = KINDS[v]
         out[k] = v
     return out
@@ -260,8 +441,9 @@ def value_of(name, log=False):
     _, entries = load()
     if name not in entries:
         near = [n for n in entries if name.lower().split("_")[0] in n.lower()]
-        hint = f"；相近的有：{', '.join(near[:6])}" if near else "；用 key ls 看全部名字"
-        die(f"没有叫 {name} 的条目{hint}")
+        hint = (T("；相近的有：", "; similar: ") + ", ".join(near[:6])) if near \
+            else T("；用 key ls 看全部名字", "; run key ls to see all names")
+        die(T(f"没有叫 {name} 的条目", f"No entry named {name}") + hint)
     if log:
         log_usage(name)
     return entries[name]["value"]
@@ -295,10 +477,14 @@ def add_reminder(name, expires):
     try:
         exp = datetime.date.fromisoformat(expires)
     except ValueError:
-        print(f"  到期日 {expires} 不是 YYYY-MM-DD 格式，没建提醒")
+        print(T(f"  到期日 {expires} 不是 YYYY-MM-DD 格式，没建提醒",
+                f"  Expiry {expires} is not YYYY-MM-DD; no reminder created"))
         return
     when = max(exp - datetime.timedelta(days=7), datetime.date.today() + datetime.timedelta(days=1))
-    title = f"密钥 {name} 将于 {expires} 到期，记得去续期或换新"
+    title = T(f"密钥 {name} 将于 {expires} 到期，记得去续期或换新",
+              f"Key {name} expires on {expires}. Renew or replace it")
+    body = T(f"换新后运行 key add {name}，或在 My Keys 里点“换新值”",
+             f"Once you have a new one, run key add {name} or use Replace Value in My Keys")
     script = f'''
     set d to current date
     set year of d to {when.year}
@@ -307,13 +493,15 @@ def add_reminder(name, expires):
     set hours of d to 9
     set minutes of d to 0
     set seconds of d to 0
-    tell application "Reminders" to make new reminder with properties {{name:"{title}", remind me date:d, body:"换新后运行 key add {name}，或在 My Keys 里点“换新值”"}}
+    tell application "Reminders" to make new reminder with properties {{name:"{title}", remind me date:d, body:"{body}"}}
     '''
     r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
     if r.returncode == 0:
-        print(f"  已在“提醒事项”里建提醒：{when} 上午 9 点")
+        print(T(f"  已在“提醒事项”里建提醒：{when} 上午 9 点", f"  Reminder added in Reminders: {when} at 9:00 AM"))
     else:
-        print(f"  提醒没建成（可能需要在系统设置里允许控制“提醒事项”）：{r.stderr.strip()[:120]}")
+        print(T("  提醒没建成（可能需要在系统设置里允许控制“提醒事项”）：",
+                "  Could not create the reminder (you may need to allow control of Reminders in System Settings): ")
+              + r.stderr.strip()[:120])
 
 
 # ---------- 备份 ----------
@@ -327,14 +515,14 @@ def kc_get():
 def kc_set(pw):
     # 用 security -i 从标准输入读命令，密码不出现在进程参数里
     cmd = (f"add-generic-password -U -s {KC_SERVICE} -a backup "
-           f"-l {shlex.quote('My Keys 备份密码')} -w {shlex.quote(pw)}\n")
+           f"-l {shlex.quote(BACKUP_LABEL)} -w {shlex.quote(pw)}\n")
     r = subprocess.run(["security", "-i"], input=cmd, text=True, capture_output=True)
     if r.returncode != 0:
-        die(f"写入钥匙串失败：{r.stderr.strip()}")
+        die(T("写入钥匙串失败：", "Failed to write to Keychain: ") + r.stderr.strip())
 
 
 def restore_note():
-    return f"""密钥备份 · 怎么恢复
+    return T(f"""密钥备份 · 怎么恢复
 =================
 
 这个磁盘映像里的 keys.env 就是全部 API 密钥（生成于 {datetime.datetime.now():%Y-%m-%d %H:%M}）。
@@ -345,52 +533,67 @@ def restore_note():
 3. 新开一个终端，所有密钥就回来了。同目录的 key 是备份时的小工具本身，装不了时可以直接用它。
 
 这个磁盘映像的密码存在旧电脑的“钥匙串访问”里（名称：My Keys 备份密码），也请在“密码”App 里存一份。
-"""
+""", f"""Key Backup · How to Restore
+===========================
+
+keys.env in this disk image holds all your API keys (created {datetime.datetime.now():%Y-%m-%d %H:%M}).
+
+To restore on a new Mac:
+1. Install My Keys following {REPO_URL} (it sets up ~/.config/secrets/ and wires up the shell).
+2. Run key restore on this .dmg file, or double-click it and drag keys.env into ~/.config/secrets/.
+3. Open a new terminal and all your keys are back. The key file next to it is the tool itself at backup time; use it directly if installing fails.
+
+The password for this disk image is stored in the old Mac's Keychain Access (name: {BACKUP_LABEL}). Keep a copy in the Passwords app too.
+""")
 
 
 def do_backup(quiet=False):
     if not BACKUP_DIR:
         if quiet:
             return
-        die("没有设置备份位置（没有 iCloud 云盘时，在 config.json 里写 backup_dir）")
+        die(T("没有设置备份位置（没有 iCloud 云盘时，在 config.json 里写 backup_dir）",
+              "No backup location set (without iCloud Drive, set backup_dir in config.json)"))
     pw = kc_get()
     if not pw:
         if not sys.stdin.isatty():
-            msg = "还没设置备份密码。在终端里运行一次 key backup，按提示设置。"
+            msg = T("还没设置备份密码。在终端里运行一次 key backup，按提示设置。",
+                    "No backup password yet. Run key backup once in a terminal and follow the prompts.")
             if quiet:
-                print(f"  （没备份：{msg}）")
+                print(T(f"  （没备份：{msg}）", f"  (Not backed up: {msg})"))
                 return
             die(msg)
         import getpass
-        print("第一次备份，请设置磁盘映像的密码（以后打开备份要用，也请存进“密码”App）。")
-        pw = getpass.getpass("密码：")
+        print(T("第一次备份，请设置磁盘映像的密码（以后打开备份要用，也请存进“密码”App）。",
+                "First backup: set a password for the disk image (you will need it to open backups; save it in the Passwords app too)."))
+        pw = getpass.getpass(T("密码：", "Password: "))
         if len(pw) < 8:
-            die("密码至少 8 位")
-        if getpass.getpass("再输一次：") != pw:
-            die("两次不一样")
+            die(T("密码至少 8 位", "Password must be at least 8 characters"))
+        if getpass.getpass(T("再输一次：", "Confirm password: ")) != pw:
+            die(T("两次不一样", "Passwords do not match"))
         kc_set(pw)
-        print("密码已存进登录钥匙串，以后备份不用再输。")
+        print(T("密码已存进登录钥匙串，以后备份不用再输。", "Password saved to the login keychain; future backups will not ask again."))
     t0 = time.time()
     with tempfile.TemporaryDirectory() as td:
-        src = os.path.join(td, "密钥备份")
+        src = os.path.join(td, T("密钥备份", "My Keys Backup"))
         os.mkdir(src)
         shutil.copy2(KEYS, os.path.join(src, "keys.env"))
         shutil.copy2(SELF, os.path.join(src, "key"))
-        with open(os.path.join(src, "怎么恢复.txt"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(src, T("怎么恢复.txt", "How to restore.txt")), "w", encoding="utf-8") as fh:
             fh.write(restore_note())
         out = os.path.join(td, BACKUP_NAME)
         r = subprocess.run(["hdiutil", "create", "-quiet", "-encryption", "AES-256", "-stdinpass",
-                            "-fs", "APFS", "-format", "UDZO", "-volname", "密钥备份",
+                            "-fs", "APFS", "-format", "UDZO", "-volname", T("密钥备份", "My Keys Backup"),
                             "-srcfolder", src, out], input=pw.encode(), capture_output=True)
         if r.returncode != 0:
-            die(f"生成磁盘映像失败：{r.stderr.decode(errors='replace').strip()}")
+            die(T("生成磁盘映像失败：", "Failed to create disk image: ") + r.stderr.decode(errors="replace").strip())
         os.makedirs(BACKUP_DIR, exist_ok=True)
         dst = os.path.join(BACKUP_DIR, BACKUP_NAME)
         tmp_dst = os.path.join(BACKUP_DIR, f".{BACKUP_NAME}.tmp")
         shutil.copyfile(out, tmp_dst)
         os.replace(tmp_dst, dst)
         size = os.path.getsize(dst)
-    print(f"  已备份：{short(dst)}（{size // 1024} KB，用时 {time.time() - t0:.1f} 秒）")
+    print(T(f"  已备份：{short(dst)}（{size // 1024} KB，用时 {time.time() - t0:.1f} 秒）",
+            f"  Backed up: {short(dst)} ({size // 1024} KB, {time.time() - t0:.1f}s)"))
 
 
 def backup_in_background():
@@ -398,11 +601,12 @@ def backup_in_background():
     if not BACKUP_DIR:
         return
     if not kc_get():
-        print("  （还没设置备份密码，这次没备份。在终端运行一次 key backup 设置）")
+        print(T("  （还没设置备份密码，这次没备份。在终端运行一次 key backup 设置）",
+                "  (No backup password yet, so this change was not backed up. Run key backup once in a terminal to set one)"))
         return
     subprocess.Popen([sys.executable, SELF, "backup"], start_new_session=True,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    print("  备份正在后台更新")
+    print(T("  备份正在后台更新", "  Updating backup in the background"))
 
 
 # ---------- 录入 ----------
@@ -411,18 +615,19 @@ def looks_bad(value, kind):
     if kind == "config":
         return None
     if re.search(r"\s", value):
-        return "里面有空格或换行"
+        return T("里面有空格或换行", "contains spaces or line breaks")
     if value.startswith(("http://", "https://")):
-        return "看起来是个网址（如果它就是个地址，加 --kind config 存成配置）"
+        return T("看起来是个网址（如果它就是个地址，加 --kind config 存成配置）",
+                 "looks like a URL (if it really is an address, add --kind config to store it as config)")
     if len(value) > 400:
-        return f"有 {len(value)} 个字符，太长"
+        return T(f"有 {len(value)} 个字符，太长", f"is {len(value)} characters long, too long")
     if len(value) < 8:
-        return "太短"
+        return T("太短", "is too short")
     return None
 
 
 def insert_pos(lines, section):
-    """新条目插到指定分类的最后一个条目后面；找不到这个分类就返回 None（放文件末尾）。"""
+    """新条目插到指定分类的最后一个条目后面；没有这个分类就在文件末尾新建一个。"""
     start, end = None, len(lines)
     for i, l in enumerate(lines):
         m = SECTION_RE.match(l)
@@ -432,8 +637,11 @@ def insert_pos(lines, section):
                 break
             if m.group(1) == section:
                 start = i
-    if start is None:
-        return None
+    if start is None:  # 没有这个分类：在文件末尾新建
+        while lines and lines[-1].strip() == "":
+            lines.pop()
+        lines += ["", f"# ===== {section} ====="]
+        return len(lines)
     last = start
     for i in range(start + 1, end):
         if lines[i].startswith("export "):
@@ -444,14 +652,31 @@ def insert_pos(lines, section):
 def store_value(name, value, opts, extra_meta, force=False, from_clip=False):
     """录入或换新的公共部分。opts: kind/group/section/expires/source/note"""
     if not NAME_RE.match(name):
-        die("名字只能用大写字母、数字和下划线，并以字母开头，例如 TAVILY_API_KEY")
+        die(T("名字只能用大写字母、数字和下划线，并以字母开头，例如 TAVILY_API_KEY",
+              "Names may only use uppercase letters, digits and underscores, starting with a letter, e.g. TAVILY_API_KEY"))
     value = value.strip()
     if not value:
-        die("内容是空的：先去网站复制密钥，再运行这条命令")
+        die(T("内容是空的：先去网站复制密钥，再运行这条命令", "The value is empty: copy the key from the website first, then run this command"))
     lines, entries = load()
     old = entries.get(name)
     meta = meta_of(lines, old) if old else {"added": TODAY}
     old_expiry = meta.get("expires", "")
+    guessed = []
+    if not old and not opts.get("no-guess"):
+        g = guess(name)
+        explicit = set(extra_meta) | {k for k, v in (("kind", opts.get("kind")), ("group", opts.get("group")),
+                                                     ("url", opts.get("source"))) if v}
+        for k in ("platform", "url"):
+            if g.get(k) and k not in explicit:
+                meta[k] = g[k]
+                guessed.append(f"{T(LABELS[k], k)}={g[k]}")
+        parent = None if ({"kind", "group"} & explicit) else guess_parent(name, entries, lines)
+        if parent:
+            meta["kind"], meta["group"] = "config", parent
+            guessed.append(T(f"类型=配置，归属={parent}", f"kind=config, group={parent}"))
+        elif not opts.get("section") and not ({"group"} & explicit) and g.get("category"):
+            opts["section"] = find_section(lines, g["category"]) or category_name(g["category"])
+            guessed.append(f"{T('分类', 'section')}={opts['section']}")
     for k, v in (("kind", opts.get("kind")), ("group", opts.get("group")), ("url", opts.get("source")),
                  ("purpose", opts.get("note")), ("expires", opts.get("expires"))):
         if v:
@@ -465,18 +690,19 @@ def store_value(name, value, opts, extra_meta, force=False, from_clip=False):
     if not force:
         bad = looks_bad(value, kind)
         if bad:
-            die(f"要存的内容{bad}，不像密钥（{mask(value)}）。确认没错就加 --force")
+            die(T(f"要存的内容{bad}，不像密钥（{mask(value)}）。确认没错就加 --force",
+                  f"The value {bad} and does not look like a key ({mask(value)}). Add --force if it is correct"))
     if meta.get("group") == name:
-        die("不能归属到自己")
+        die(T("不能归属到自己", "An entry cannot belong to itself"))
     if meta.get("group") and meta["group"] not in entries:
-        die(f"归属的 {meta['group']} 不存在，先录入它")
+        die(T(f"归属的 {meta['group']} 不存在，先录入它", f"Group {meta['group']} does not exist; add it first"))
     if old and old["value"] == value and not extra_meta and not any(opts.values()):
-        print(f"{name} 已经是这个值，没有变化。")
+        print(T(f"{name} 已经是这个值，没有变化。", f"{name} already has this value; nothing changed."))
         return
     if kind == "secret":
         for other, e in entries.items():
             if other != name and e["value"] == value:
-                print(f"  注意：这个值和已有的 {other} 一样。")
+                print(T(f"  注意：这个值和已有的 {other} 一样。", f"  Note: this value is the same as {other}."))
     if old and old["value"] != value:
         meta["rotated"] = TODAY
     block = [format_meta(meta)] if format_meta(meta) else []
@@ -484,7 +710,8 @@ def store_value(name, value, opts, extra_meta, force=False, from_clip=False):
     if old:
         start = old["meta_line"] if old["meta_line"] is not None else old["start"]
         lines[start:old["end"] + 1] = block
-        action = "已换成新值（旧值留在本地快照里）" if old["value"] != value else "说明已更新"
+        action = T("已换成新值（旧值留在本地快照里）", "replaced (old value kept in a local snapshot)") \
+            if old["value"] != value else T("说明已更新", "notes updated")
     else:
         pos = None
         if meta.get("group"):  # 有归属的，紧跟在主条目和它已有的附属后面
@@ -499,22 +726,26 @@ def store_value(name, value, opts, extra_meta, force=False, from_clip=False):
             lines += [""] + block
         else:
             lines[pos:pos] = block
-        action = "已录入"
+        action = T("已录入", "added")
     save(lines)
     if from_clip and pbpaste().strip() == value:
         pbcopy("")
-    print(f"{name} {action}：{value if kind == 'config' else mask(value)}")
+    print(f"{name} {action}" + T("：", ": ") + (value if kind == "config" else mask(value)))
     if from_clip:
-        print("  剪贴板已清空")
+        print(T("  剪贴板已清空", "  Clipboard cleared"))
     if meta.get("expires") and meta["expires"] != old_expiry:
         add_reminder(name, meta["expires"])
-    print("  新开的终端、脚本和 AI 的命令马上就能用 $" + name)
+    if guessed:
+        print(T("  自动补上：", "  Filled in: ") + T("；", "; ").join(guessed)
+              + T("（不对就用 key set 改）", " (fix with key set if wrong)"))
+    print(T("  新开的终端、脚本和 AI 的命令马上就能用 $" + name,
+            "  New terminals, scripts and AI commands can use $" + name + " right away"))
     backup_in_background()
 
 
 def parse_common(rest):
     opts = {"kind": None, "group": None, "section": None, "expires": None, "source": None, "note": None,
-            "as": None, "strip-prefix": None}
+            "as": None, "strip-prefix": None, "no-guess": None}
     extra, flags = [], set()
     i = 0
     while i < len(rest):
@@ -522,40 +753,45 @@ def parse_common(rest):
         key = a[2:] if a.startswith("--") else None
         if a == "--meta":
             if i + 1 >= len(rest):
-                die("--meta 后面要跟 字段=值")
+                die(T("--meta 后面要跟 字段=值", "--meta needs field=value"))
             extra.append(rest[i + 1])
             i += 2
         elif key in opts:
             if i + 1 >= len(rest):
-                die(f"{a} 后面要跟内容")
+                die(T(f"{a} 后面要跟内容", f"{a} needs a value"))
             opts[key] = rest[i + 1]
             i += 2
         elif a in ("--prompt", "--force", "--stdin"):
             flags.add(a)
             i += 1
+        elif a == "--no-guess":
+            opts["no-guess"] = True
+            i += 1
         else:
-            die(f"不认识的参数 {a}")
+            die(T(f"不认识的参数 {a}", f"Unknown option {a}"))
     if opts["kind"] and opts["kind"] not in KINDS:
-        die("--kind 只能是 secret（密钥）或 config（配置）")
+        die(T("--kind 只能是 secret（密钥）或 config（配置）", "--kind must be secret or config"))
     return opts, parse_assignments(extra), flags
 
 
 def cmd_add(args):
     if not args or args[0].startswith("-"):
-        die("用法：key add 名字 [--kind secret|config] [--group 主条目] [--section 分类] "
-            "[--meta 字段=值]… [--prompt|--stdin] [--force]")
+        die(T("用法：key add 名字 [--kind secret|config] [--group 主条目] [--section 分类] "
+              "[--meta 字段=值]… [--prompt|--stdin] [--force]",
+              "usage: key add NAME [--kind secret|config] [--group PARENT] [--section SECTION] "
+              "[--meta field=value]... [--prompt|--stdin] [--force]"))
     name = args[0]
     opts, extra, flags = parse_common(args[1:])
     from_clip = False
     if "--prompt" in flags:
         import getpass
-        value = getpass.getpass(f"粘贴 {name} 的值（不显示）：")
+        value = getpass.getpass(T(f"粘贴 {name} 的值（不显示）：", f"Paste the value for {name} (hidden): "))
     elif "--stdin" in flags:
         value = sys.stdin.read()
     else:
         value, from_clip = pbpaste(), True
         if not value.strip():
-            die("剪贴板是空的：先去网站复制密钥，再运行这条命令")
+            die(T("剪贴板是空的：先去网站复制密钥，再运行这条命令", "The clipboard is empty: copy the key from the website first, then run this command"))
     store_value(name, value, opts, extra, force="--force" in flags, from_clip=from_clip)
 
 
@@ -627,30 +863,37 @@ def cmd_scan(args):
             if v.startswith(("http://", "https://", "/", "~")) or var.endswith(("_ENV_VAR", "_env_var")):
                 continue
             hit = by_value.get(v)
-            status = f"已在 keys.env（{', '.join(hit)}）" if hit else "新的"
-            rows.append(f"  第 {ln} 行  {var:<28} {mask(v):<20} {status}")
+            status = T(f"已在 keys.env（{', '.join(hit)}）", f"already in keys.env ({', '.join(hit)})") if hit \
+                else T("新的", "new")
+            rows.append(T(f"  第 {ln} 行  ", f"  line {ln:<4} ") + f"{var:<28} {mask(v):<20} {status}")
         if rows:
             print(short(path))
             print("\n".join(rows))
             found += len(rows)
     if not found:
-        print("没有发现散落的明文密钥")
+        print(T("没有发现散落的明文密钥", "No stray plaintext keys found"))
     else:
-        print(f"\n共 {found} 处。标“新的”用 key import 文件 变量名 --as 新名字 收进来（值不经过屏幕）；"
-              "标“已在 keys.env”的，把那里的明文改成按名字取（见 key help mcp）")
+        print(T(f"\n共 {found} 处。标“新的”用 key import 文件 变量名 --as 新名字 收进来（值不经过屏幕）；"
+                "标“已在 keys.env”的，把那里的明文改成按名字取（见 key help mcp）",
+                f"\n{found} found. Bring in the \"new\" ones with key import FILE VAR --as NEW_NAME "
+                "(the value never hits the screen). For those \"already in keys.env\", replace the plaintext "
+                "there with a lookup by name (see key help mcp)"))
 
 
 def cmd_import(args):
     if len(args) < 2:
-        die("用法：key import 文件 变量名 [--as 新名字] [--strip-prefix 'Bearer '] "
-            "[--kind …] [--group …] [--section …] [--meta 字段=值]…")
+        die(T("用法：key import 文件 变量名 [--as 新名字] [--strip-prefix 'Bearer '] "
+              "[--kind …] [--group …] [--section …] [--meta 字段=值]…",
+              "usage: key import FILE VAR [--as NEW_NAME] [--strip-prefix 'Bearer '] "
+              "[--kind ...] [--group ...] [--section ...] [--meta field=value]..."))
     path, var = os.path.expanduser(args[0]), args[1]
     opts, extra, flags = parse_common(args[2:])
     hits = [v for _, n, v in find_assignments(path) if n == var]
     if not hits:
-        die(f"{short(path)} 里没找到 {var}")
+        die(T(f"{short(path)} 里没找到 {var}", f"{var} not found in {short(path)}"))
     if len(set(hits)) > 1:
-        print(f"  注意：{var} 在这个文件里有 {len(set(hits))} 个不同的值，用的是第一个")
+        print(T(f"  注意：{var} 在这个文件里有 {len(set(hits))} 个不同的值，用的是第一个",
+                f"  Note: {var} has {len(set(hits))} different values in this file; using the first one"))
     value = hits[0]
     prefix = opts.get("strip-prefix") or ("Bearer " if value.startswith("Bearer ") else None)
     if prefix and value.startswith(prefix):
@@ -687,9 +930,9 @@ def cmd_ls(args):
     def row(n, indent=""):
         m, e = metas[n], entries[n]
         shown = e["value"] if m.get("kind") == "config" else mask(e["value"])
-        info = "  ".join(x for x in (m.get("platform", ""), ("到期" + m["expires"]) if m.get("expires") else "",
+        info = "  ".join(x for x in (m.get("platform", ""), (T("到期", "expires ") + m["expires"]) if m.get("expires") else "",
                                      m.get("purpose", "")) if x)
-        tag = "［配置］" if m.get("kind") == "config" else ""
+        tag = T("［配置］", " [config]") if m.get("kind") == "config" else ""
         return f"{indent}{n}{tag}", shown, info
 
     rows, tops = [], 0
@@ -704,30 +947,31 @@ def cmd_ls(args):
         rows.append(row(n))
         rows += [row(c, "  └ ") for c in children.get(n, [])]
     if not rows:
-        print("没有匹配的条目")
+        print(T("没有匹配的条目", "No matching entries"))
         return
     w = min(max(len(r[0]) for r in rows), 40)
     for n, m, info in rows:
         print(f"{n:<{w}}  {m:<20}  {info}")
-    print(f"\n{tops} 组，{len(rows)} 条。文件：{short(KEYS)}")
+    print(T(f"\n{tops} 组，{len(rows)} 条。文件：{short(KEYS)}", f"\n{tops} group(s), {len(rows)} entr{'y' if len(rows) == 1 else 'ies'}. File: {short(KEYS)}"))
 
 
 def cmd_get(args):
     nolog = "--no-log" in args
     args = [a for a in args if a != "--no-log"]
     if len(args) != 1:
-        die("用法：key get 名字")
+        die(T("用法：key get 名字", "usage: key get NAME"))
     v = value_of(args[0], log=not nolog)
     sys.stdout.write(v + ("\n" if sys.stdout.isatty() else ""))
 
 
 def cmd_run(args):
     if "--" not in args:
-        die("用法：key run 名字1 [名字2 …] -- 命令 参数…（--group 主条目：连同它的配置一起；--all：全部）")
+        die(T("用法：key run 名字1 [名字2 …] -- 命令 参数…（--group 主条目：连同它的配置一起；--all：全部）",
+              "usage: key run NAME1 [NAME2 ...] -- COMMAND ARGS... (--group PARENT: include its config; --all: everything)"))
     k = args.index("--")
     names, cmd = args[:k], args[k + 1:]
     if not cmd:
-        die("-- 后面要写要运行的命令")
+        die(T("-- 后面要写要运行的命令", "Put the command to run after --"))
     lines, entries = load()
     env = dict(os.environ)
     if names == ["--all"]:
@@ -738,13 +982,13 @@ def cmd_run(args):
             if n == "--group":
                 g = next(it, None)
                 if g not in entries:
-                    die(f"没有叫 {g} 的条目")
+                    die(T(f"没有叫 {g} 的条目", f"No entry named {g}"))
                 want += [g] + [c for c, e in entries.items() if group_of(lines, e) == g]
             else:
                 want.append(n)
         for n in want:
             if n not in entries:
-                die(f"没有叫 {n} 的条目")
+                die(T(f"没有叫 {n} 的条目", f"No entry named {n}"))
             env[n] = entries[n]["value"]
             log_usage(n)
     # 图形界面启动时 PATH 很短，补上常用位置，好找到 npx、uvx 这类命令
@@ -754,12 +998,13 @@ def cmd_run(args):
     try:
         os.execvpe(cmd[0], cmd, env)
     except FileNotFoundError:
-        die(f"找不到命令 {cmd[0]}")
+        die(T(f"找不到命令 {cmd[0]}", f"Command not found: {cmd[0]}"))
 
 
 def cmd_header(args):
     if not args:
-        die("用法：key header 名字 [--name Authorization] [--format 'Bearer {}']")
+        die(T("用法：key header 名字 [--name Authorization] [--format 'Bearer {}']",
+              "usage: key header NAME [--name Authorization] [--format 'Bearer {}']"))
     name, hname, fmt = args[0], "Authorization", "Bearer {}"
     rest = args[1:]
     for i in range(0, len(rest) - 1, 2):
@@ -772,36 +1017,40 @@ def cmd_header(args):
 
 def cmd_copy(args):
     if not args:
-        die("用法：key copy 名字 [秒数，默认 45]")
+        die(T("用法：key copy 名字 [秒数，默认 45]", "usage: key copy NAME [SECONDS, default 45]"))
     secs = int(args[1]) if len(args) > 1 else 45
     v = value_of(args[0], log=True)
     pbcopy(v)
     clear_clipboard_later(v, secs)
-    print(f"{args[0]} 已复制到剪贴板（{mask(v)}），{secs} 秒后自动清空。")
+    print(T(f"{args[0]} 已复制到剪贴板（{mask(v)}），{secs} 秒后自动清空。",
+            f"{args[0]} copied to clipboard ({mask(v)}); it will be cleared in {secs} seconds."))
 
 
 def cmd_set(args):
     if len(args) < 2:
-        die("用法：key set 名字 字段=值 …（值留空表示删掉这个字段）\n"
-            "  字段：platform 平台、url 网址、account 账号、purpose 用途、tags 标签、"
-            "kind 类型（secret/config）、group 归属、expires 到期、note 备注")
+        die(T("用法：key set 名字 字段=值 …（值留空表示删掉这个字段）\n"
+              "  字段：platform 平台、url 网址、account 账号、purpose 用途、tags 标签、"
+              "kind 类型（secret/config）、group 归属、expires 到期、note 备注",
+              "usage: key set NAME field=value ... (an empty value removes the field)\n"
+              "  fields: platform, url, account, purpose, tags, "
+              "kind (secret/config), group, expires, note"))
     name = args[0]
     lines, entries = load()
     e = entries.get(name)
     if not e:
-        die(f"没有叫 {name} 的条目")
+        die(T(f"没有叫 {name} 的条目", f"No entry named {name}"))
     meta = meta_of(lines, e)
     old_expiry = meta.get("expires", "")
     for k, v in parse_assignments(args[1:]).items():
         if k == "group" and v and (v not in entries or v == name):
-            die(f"归属的 {v} 不存在或就是它自己")
+            die(T(f"归属的 {v} 不存在或就是它自己", f"Group {v} does not exist or is the entry itself"))
         if v:
             meta[k] = v
         else:
             meta.pop(k, None)
     write_meta(lines, e, meta)
     save(lines)
-    print(f"{name} 的说明已更新")
+    print(T(f"{name} 的说明已更新", f"Updated notes for {name}"))
     if meta.get("expires") and meta["expires"] != old_expiry:
         add_reminder(name, meta["expires"])
     backup_in_background()
@@ -809,35 +1058,37 @@ def cmd_set(args):
 
 def cmd_del(args):
     if len(args) != 1:
-        die("用法：key del 名字")
+        die(T("用法：key del 名字", "usage: key del NAME"))
     lines, entries = load()
     e = entries.get(args[0])
     if not e:
-        die(f"没有叫 {args[0]} 的条目")
+        die(T(f"没有叫 {args[0]} 的条目", f"No entry named {args[0]}"))
     kids = [n for n, x in entries.items() if group_of(lines, x) == args[0]]
     if kids:
-        die(f"{args[0]} 下面还挂着 {', '.join(kids)}，先删掉它们或改掉它们的归属")
+        die(T(f"{args[0]} 下面还挂着 {', '.join(kids)}，先删掉它们或改掉它们的归属",
+              f"{args[0]} still has {', '.join(kids)} under it; delete them or change their group first"))
     start = e["meta_line"] if e["meta_line"] is not None else e["start"]
     del lines[start:e["end"] + 1]
     save(lines)
-    print(f"{args[0]} 已删除" + (f"（旧值留在本地快照 {short(SNAP_DIR)} 里）" if SNAP_DIR else ""))
+    print(T(f"{args[0]} 已删除", f"{args[0]} deleted")
+          + (T(f"（旧值留在本地快照 {short(SNAP_DIR)} 里）", f" (old value kept in local snapshots at {short(SNAP_DIR)})")
+             if SNAP_DIR else ""))
     backup_in_background()
 
 
 # ---------- 初始化、体检、接入 AI ----------
 
-TEMPLATE = """# My Keys 密钥文件：所有 API 密钥都在这里，~/.zshenv 会自动加载。
+def template():
+    head = T("""# My Keys 密钥文件：所有 API 密钥都在这里，~/.zshenv 会自动加载。
 # 请用 key 命令或 My Keys 应用来增删改。说明见 {readme}
 # 每个条目上方的 “#: ” 行是它的说明（平台、网址、账号、用途、到期……），终端加载时当作注释忽略。
-
-# ===== 大模型 =====
-
-# ===== 数据 =====
-
-# ===== 搜索 =====
-
-# ===== 工具与服务 =====
-"""
+# 分类就是下面这些 “# ===== 名字 =====” 行，可以随意增删改名；录入时会自动归到合适的分类。
+""", """# My Keys secrets file: every API key lives here and ~/.zshenv loads it automatically.
+# Edit it with the key command or the My Keys app. Docs: {readme}
+# The "#: " line above an entry holds its notes (platform, url, account, purpose, expiry...); shells ignore it.
+# Sections are the "# ===== Name =====" lines below. Add, rename or remove them freely.
+""").format(readme=short(LOCAL_README))
+    return head + "".join(f"\n# ===== {category_name(c)} =====\n" for c in ("ai", "search", "data", "cloud", "other"))
 
 
 def shell_wired():
@@ -855,19 +1106,21 @@ def cmd_init(args):
     os.chmod(STATE_DIR, 0o700)
     if not os.path.exists(KEYS):
         with open(KEYS, "w", encoding="utf-8") as fh:
-            fh.write(TEMPLATE.format(readme=short(LOCAL_README)))
-        done.append(f"建好密钥文件 {short(KEYS)}")
+            fh.write(template())
+        done.append(T(f"建好密钥文件 {short(KEYS)}", f"Created secrets file {short(KEYS)}"))
     else:
-        done.append(f"密钥文件已存在 {short(KEYS)}")
+        done.append(T(f"密钥文件已存在 {short(KEYS)}", f"Secrets file already exists at {short(KEYS)}"))
     os.chmod(KEYS, 0o600)
     if "--no-shell" not in args and not shell_wired():
         with open(os.path.join(HOME, ".zshenv"), "a", encoding="utf-8") as fh:
-            fh.write("\n# My Keys：所有终端和脚本自动加载 API 密钥\n" + SOURCE_LINE + "\n")
-        done.append("~/.zshenv 加了一行自动加载")
+            fh.write(T("\n# My Keys：所有终端和脚本自动加载 API 密钥\n",
+                       "\n# My Keys: load API keys in every terminal and script\n") + SOURCE_LINE + "\n")
+        done.append(T("~/.zshenv 加了一行自动加载", "Added an auto-load line to ~/.zshenv"))
     write_local_readme()
-    done.append(f"本机说明写在 {short(LOCAL_README)}")
-    print("；".join(done))
-    print("下一步：key scan 找散落的明文密钥；key agents --write 让本机的 AI 助手都按同一套规则用密钥。")
+    done.append(T(f"本机说明写在 {short(LOCAL_README)}", f"Local guide written to {short(LOCAL_README)}"))
+    print(T("；", ". ").join(done) + T("", "."))
+    print(T("下一步：key scan 找散落的明文密钥；key agents --write 让本机的 AI 助手都按同一套规则用密钥。",
+            "Next: key scan to find stray plaintext keys; key agents --write so every AI assistant on this Mac follows the same key rules."))
 
 
 def detected_agents():
@@ -884,7 +1137,7 @@ def detected_agents():
 
 
 def agent_rules():
-    return f"""{BLOCK_START}
+    return T(f"""{BLOCK_START}
 ## API 密钥（由 My Keys 管理）
 
 - 所有密钥在 `{short(KEYS)}`，zsh 自动加载：命令里直接用 `$变量名`，代码里读环境变量。不要 `cat` 这个文件，不要把完整的值写进聊天、日志或代码仓库，需要时打码。
@@ -894,7 +1147,17 @@ def agent_rules():
 - 给 MCP 服务配密钥，不要把明文抄进配置：命令行型写成 `key run 名字 -- 原命令`，HTTP 型用 `key header 名字` 生成请求头（`key help mcp` 有示例）。
 - 网页或应用里必须粘贴密钥时：`key copy 名字`（45 秒后自动清空剪贴板），请用户自己按 ⌘V。
 - 改完配置运行 `key check` 体检。本机细节：`{short(LOCAL_README)}`。
-{BLOCK_END}"""
+{BLOCK_END}""", f"""{BLOCK_START}
+## API keys (managed by My Keys)
+
+- All keys live in `{short(KEYS)}` and zsh loads them automatically: use `$VAR_NAME` in commands and read environment variables in code. Do not `cat` this file, and never put full values in chat, logs or repositories; mask them when needed.
+- To see what exists and what it is called: `key ls KEYWORD` (masked values only). Entries tagged [config] are settings such as endpoints or regions, not secrets, and sit under the key they belong to.
+- When a variable is missing from the environment (not zsh, or launched from a GUI): `key get NAME`; to hand keys to a single command only: `key run NAME... -- COMMAND`.
+- When the user says "I copied a new key, save it as XXX": run `key add XXX`, which reads the value straight from the clipboard into the file. Never ask the user to paste a key into chat. Record whatever the user mentions: `--meta platform=... --meta url=... --meta account=... --meta purpose=... --meta expires=YYYY-MM-DD`; for settings like endpoints use `--kind config --group PARENT_KEY`.
+- When configuring keys for MCP servers, never copy plaintext into the config: for command-line servers write `key run NAME -- ORIGINAL_COMMAND`; for HTTP servers generate headers with `key header NAME` (see `key help mcp` for examples).
+- When a key must be pasted into a web page or app: `key copy NAME` (clipboard clears after 45 seconds), then ask the user to press ⌘V themselves.
+- After changing configs, run `key check`. Local details: `{short(LOCAL_README)}`.
+{BLOCK_END}""")
 
 
 def write_block(path, block):
@@ -921,17 +1184,21 @@ def cmd_agents(args):
         block = agent_rules()
         for label, p, _ in agents:
             changed = write_block(p, block)
-            print(f"  {label:<16} {short(p)}  {'已写入规则' if changed else '规则已是最新'}")
+            print(f"  {label:<16} {short(p)}  " + (T("已写入规则", "rules written") if changed else T("规则已是最新", "rules up to date")))
         if not agents:
-            print("  没发现认识的 AI 助手。其他助手：把 key agent-rules 的输出放进它的全局说明里。")
+            print(T("  没发现认识的 AI 助手。其他助手：把 key agent-rules 的输出放进它的全局说明里。",
+                    "  No known AI assistants found. For other assistants, add the output of key agent-rules to their global instructions."))
         write_local_readme()
         return
     for label, p, wired in agents:
-        print(f"  {label:<16} {short(p)}  {'已接入' if wired else '未接入'}")
+        print(f"  {label:<16} {short(p)}  " + (T("已接入", "connected") if wired else T("未接入", "not connected")))
     if not agents:
-        print("  没发现认识的 AI 助手")
-    print("\n运行 key agents --write 给它们写入同一套密钥规则（只改有标记的那一段，第一次会留一份 .mykeys-bak）。"
-          "\n不在列表里的助手：把 key agent-rules 的输出贴进它的全局说明。")
+        print(T("  没发现认识的 AI 助手", "  No known AI assistants found"))
+    print(T("\n运行 key agents --write 给它们写入同一套密钥规则（只改有标记的那一段，第一次会留一份 .mykeys-bak）。"
+            "\n不在列表里的助手：把 key agent-rules 的输出贴进它的全局说明。",
+            "\nRun key agents --write to give them all the same key rules (only the marked block is changed; "
+            "a .mykeys-bak copy is kept the first time)."
+            "\nFor assistants not listed, paste the output of key agent-rules into their global instructions."))
 
 
 def cmd_agent_rules(args):
@@ -940,7 +1207,9 @@ def cmd_agent_rules(args):
 
 def write_local_readme():
     agents = detected_agents()
-    rows = [
+    snap = short(SNAP_DIR) if SNAP_DIR else T("未开启", "off")
+    bak = short(os.path.join(BACKUP_DIR, BACKUP_NAME)) if BACKUP_DIR else T("未开启", "off")
+    rows = T([
         "# 本机的 API 密钥（My Keys）",
         "",
         f"> 由 `key` 自动生成，写给本机的人和 AI 助手看，不要手改。项目主页：{REPO_URL}",
@@ -953,20 +1222,44 @@ def write_local_readme():
         "| 自动加载 | `~/.zshenv` 里的一行 `source`，所以每个 zsh 终端和脚本都有 `$变量名` |",
         f"| 命令行工具 | `{short(SELF)}`（`key help` 看全部命令） |",
         "| 图形界面 | `/Applications/My Keys.app`（Touch ID 解锁，和 `key` 改的是同一个文件） |",
-        f"| 本地快照 | `{short(SNAP_DIR) if SNAP_DIR else '未开启'}`（每次修改前留一份，保留 5 份） |",
-        f"| 加密备份 | `{short(os.path.join(BACKUP_DIR, BACKUP_NAME)) if BACKUP_DIR else '未开启'}`（双击、输密码即可打开） |",
+        f"| 本地快照 | `{snap}`（每次修改前留一份，保留 5 份） |",
+        f"| 加密备份 | `{bak}`（双击、输密码即可打开） |",
         f"| 使用记录 | `{short(USAGE)}`（通过 key 取用时记下“上次使用”） |",
         "",
         "## 已接入的 AI 助手",
         "",
-    ]
+    ], [
+        "# API keys on this Mac (My Keys)",
+        "",
+        f"> Generated by `key` for the people and AI assistants on this Mac. Do not edit by hand. Project: {REPO_URL}",
+        "",
+        "## Where things are",
+        "",
+        "| What | Where |",
+        "|---|---|",
+        f"| All keys (the only copy) | `{short(KEYS)}` |",
+        "| Auto-load | A `source` line in `~/.zshenv`, so every zsh terminal and script has `$VAR_NAME` |",
+        f"| Command-line tool | `{short(SELF)}` (`key help` lists all commands) |",
+        "| App | `/Applications/My Keys.app` (unlocks with Touch ID; edits the same file as `key`) |",
+        f"| Local snapshots | `{snap}` (one before each change, last 5 kept) |",
+        f"| Encrypted backup | `{bak}` (double-click and enter the password to open) |",
+        f"| Usage log | `{short(USAGE)}` (records \"last used\" when read through key) |",
+        "",
+        "## Connected AI assistants",
+        "",
+    ])
     if agents:
-        rows += [f"- {label}：`{short(p)}`（{'已写入规则' if w else '未接入，运行 key agents --write'}）"
+        rows += [f"- {label}" + T("：", ": ") + f"`{short(p)}`"
+                 + (T("（已写入规则）", " (rules written)") if w
+                    else T("（未接入，运行 key agents --write）", " (not connected; run key agents --write)"))
                  for label, p, w in agents]
     else:
-        rows.append("- 还没有。装好 AI 助手后运行 `key agents --write`。")
-    rows += ["", "其他助手：把 `key agent-rules` 的输出贴进它的全局说明。", "",
-             "## 规则（每个 AI 助手的全局说明里都有同样一段）", "",
+        rows.append(T("- 还没有。装好 AI 助手后运行 `key agents --write`。",
+                      "- None yet. Run `key agents --write` after installing an AI assistant."))
+    rows += ["", T("其他助手：把 `key agent-rules` 的输出贴进它的全局说明。",
+                   "Other assistants: paste the output of `key agent-rules` into their global instructions."), "",
+             T("## 规则（每个 AI 助手的全局说明里都有同样一段）",
+               "## Rules (the same block appears in every AI assistant's global instructions)"), "",
              agent_rules().replace(BLOCK_START, "").replace(BLOCK_END, "").strip(), ""]
     os.makedirs(os.path.dirname(LOCAL_README), exist_ok=True)
     with open(LOCAL_README, "w", encoding="utf-8") as fh:
@@ -978,15 +1271,16 @@ def cmd_check(args):
     today = datetime.date.today()
     problems = []
     if not shell_wired():
-        problems.append("~/.zshenv 没有加载密钥文件：运行 key init")
+        problems.append(T("~/.zshenv 没有加载密钥文件：运行 key init", "~/.zshenv does not load the secrets file: run key init"))
     if os.stat(KEYS).st_mode & 0o077:
-        problems.append(f"{short(KEYS)} 别的用户也能读：chmod 600 {short(KEYS)}")
+        problems.append(T(f"{short(KEYS)} 别的用户也能读：chmod 600 {short(KEYS)}",
+                          f"{short(KEYS)} is readable by other users: chmod 600 {short(KEYS)}"))
     seen = {}
     for name, e in entries.items():
         meta = meta_of(lines, e)
         g = meta.get("group")
         if g and g not in entries:
-            problems.append(f"{name} 归属的 {g} 不存在")
+            problems.append(T(f"{name} 归属的 {g} 不存在", f"{name} belongs to {g}, which does not exist"))
         if meta.get("kind", "secret") == "secret" and len(e["value"]) >= 12:
             seen.setdefault(e["value"], []).append(name)
         exp = meta.get("expires")
@@ -994,15 +1288,16 @@ def cmd_check(args):
             try:
                 days = (datetime.date.fromisoformat(exp) - today).days
             except ValueError:
-                problems.append(f"{name} 的到期日 {exp} 格式不对")
+                problems.append(T(f"{name} 的到期日 {exp} 格式不对", f"{name} has an invalid expiry date: {exp}"))
                 continue
             if days < 0:
-                problems.append(f"{name} 已于 {exp} 过期")
+                problems.append(T(f"{name} 已于 {exp} 过期", f"{name} expired on {exp}"))
             elif days <= 30:
-                problems.append(f"{name} 还有 {days} 天到期（{exp}）")
+                problems.append(T(f"{name} 还有 {days} 天到期（{exp}）", f"{name} expires in {days} days ({exp})"))
     for names in seen.values():
         if len(names) > 1:
-            problems.append(f"{' 和 '.join(names)} 的值完全一样，确认是不是存重了")
+            problems.append(T(f"{' 和 '.join(names)} 的值完全一样，确认是不是存重了",
+                              f"{' and '.join(names)} have identical values; check for duplicates"))
     for path in SCAN_FILES:
         if not os.path.exists(path) or os.path.realpath(path) == os.path.realpath(KEYS):
             continue
@@ -1011,22 +1306,23 @@ def cmd_check(args):
         hits = [n for n, e in entries.items()
                 if len(e["value"]) >= 12 and meta_of(lines, e).get("kind") != "config" and e["value"] in text]
         if hits:
-            problems.append(f"{short(path)} 里抄了明文：{', '.join(hits)}（改成按名字取，见 key help mcp）")
+            problems.append(T(f"{short(path)} 里抄了明文：{', '.join(hits)}（改成按名字取，见 key help mcp）",
+                              f"{short(path)} contains plaintext copies of: {', '.join(hits)} (look them up by name instead; see key help mcp)"))
     if BACKUP_DIR:
         dst = os.path.join(BACKUP_DIR, BACKUP_NAME)
         if not os.path.exists(dst):
-            problems.append("还没有加密备份：在终端运行一次 key backup")
+            problems.append(T("还没有加密备份：在终端运行一次 key backup", "No encrypted backup yet: run key backup once in a terminal"))
         elif os.path.getmtime(dst) < os.path.getmtime(KEYS):
-            problems.append("备份比密钥文件旧：运行 key backup")
+            problems.append(T("备份比密钥文件旧：运行 key backup", "Backup is older than the secrets file: run key backup"))
     for label, p, wired in detected_agents():
         if not wired:
-            problems.append(f"{label} 还没接入密钥规则：运行 key agents --write")
+            problems.append(T(f"{label} 还没接入密钥规则：运行 key agents --write", f"{label} does not have the key rules yet: run key agents --write"))
     if not problems:
-        print("一切正常")
+        print(T("一切正常", "All good"))
         return
     for p in problems:
         print("· " + p)
-    print(f"\n共 {len(problems)} 项需要留意")
+    print(T(f"\n共 {len(problems)} 项需要留意", f"\n{len(problems)} item(s) need attention"))
 
 
 def cmd_backup(args):
@@ -1035,16 +1331,16 @@ def cmd_backup(args):
 
 def cmd_restore(args):
     if len(args) != 1:
-        die("用法：key restore 备份文件.dmg（会先把当前文件留快照）")
+        die(T("用法：key restore 备份文件.dmg（会先把当前文件留快照）", "usage: key restore BACKUP.dmg (the current file is snapshotted first)"))
     pw = kc_get()
     if not pw:
         import getpass
-        pw = getpass.getpass("备份的密码：")
+        pw = getpass.getpass(T("备份的密码：", "Backup password: "))
     with tempfile.TemporaryDirectory() as mnt:
         r = subprocess.run(["hdiutil", "attach", "-quiet", "-nobrowse", "-readonly", "-stdinpass",
                             "-mountpoint", mnt, args[0]], input=pw.encode(), capture_output=True)
         if r.returncode != 0:
-            die("打不开备份（密码不对或文件损坏）")
+            die(T("打不开备份（密码不对或文件损坏）", "Cannot open the backup (wrong password or damaged file)"))
         try:
             snapshot()
             os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
@@ -1052,7 +1348,7 @@ def cmd_restore(args):
             os.chmod(KEYS, 0o600)
         finally:
             subprocess.run(["hdiutil", "detach", "-quiet", mnt])
-    print(f"已恢复到 {short(KEYS)}，新开的终端生效。")
+    print(T(f"已恢复到 {short(KEYS)}，新开的终端生效。", f"Restored to {short(KEYS)}; takes effect in new terminals."))
 
 
 def cmd_edit(args):
@@ -1063,7 +1359,7 @@ def cmd_edit(args):
     subprocess.run(["open", "-t", KEYS])
 
 
-HELP_MCP = """给 MCP 服务配密钥（不把明文抄进配置）：
+HELP_MCP = T("""给 MCP 服务配密钥（不把明文抄进配置）：
 
   命令行型（stdio）：把原来的命令包一层，只把它需要的那个密钥交给它
     "command": "{k}", "args": ["run", "EXAMPLE_API_KEY", "--", "npx", "-y", "example-mcp"]
@@ -1074,26 +1370,62 @@ HELP_MCP = """给 MCP 服务配密钥（不把明文抄进配置）：
   HTTP 型，Codex：bearer_token_env_var = "EXAMPLE_TOKEN"（Codex 从环境变量读）
 
 改完运行 key check，确认配置里不再有明文。
-""".format(k=SELF)
+""", """Configuring keys for MCP servers (without copying plaintext into configs):
+
+  Command-line (stdio): wrap the original command and pass it only the key it needs
+    "command": "{k}", "args": ["run", "EXAMPLE_API_KEY", "--", "npx", "-y", "example-mcp"]
+
+  HTTP, Claude Code: use the headers helper
+    "headersHelper": "{k} header EXAMPLE_TOKEN"
+
+  HTTP, Codex: bearer_token_env_var = "EXAMPLE_TOKEN" (Codex reads it from the environment)
+
+Afterwards run key check to confirm no plaintext is left in your configs.
+""").format(k=SELF)
+
+def cmd_catalog(args):
+    if "--json" in args:
+        json.dump({"categories": {c: {"name": category_name(c), "keywords": list(v[2])} for c, v in CATEGORIES.items()},
+                   "platforms": [{"prefix": p, "platform": n, "url": u, "category": c} for p, n, u, c in CATALOG],
+                   "configSuffixes": list(CONFIG_SUFFIXES)}, sys.stdout, ensure_ascii=False)
+        return
+    kw = " ".join(args).lower()
+    for p, n, u, c in CATALOG:
+        if kw and kw not in (p + n + u + c).lower():
+            continue
+        print(f"{p + '*':<16} {n:<26} {category_name(c):<12} {u}")
+
 
 COMMANDS = {
-    "init": (cmd_init, "第一次使用：建好密钥文件、接好终端、生成本机说明"),
-    "add": (cmd_add, "录入或换新（值取自剪贴板）：key add 名字 [--kind config --group 主条目] [--meta 字段=值]…"),
-    "ls": (cmd_ls, "列出全部条目，配置挂在所属密钥下面，不显示密钥值：key ls [关键词] [--json]"),
-    "get": (cmd_get, "取值给脚本或应用用：key get 名字"),
-    "run": (cmd_run, "只把指定条目交给一个命令：key run 名字… -- 命令（--group 主条目 连同配置一起）"),
-    "header": (cmd_header, "给 HTTP 型 MCP 生成请求头：key header 名字"),
-    "copy": (cmd_copy, "复制到剪贴板，45 秒后自动清空：key copy 名字"),
-    "set": (cmd_set, "改说明：key set 名字 platform=… url=… account=… purpose=… kind=… group=… expires=…"),
-    "del": (cmd_del, "删除：key del 名字"),
-    "scan": (cmd_scan, "找散落在 shell 配置、AI 工具配置、.env 里的明文密钥：key scan [文件或目录…]"),
-    "import": (cmd_import, "把别处的明文收进来（值不经过屏幕）：key import 文件 变量名 [--as 新名字]"),
-    "check": (cmd_check, "体检：到期、重复、明文副本、终端接线、备份、AI 接入"),
-    "agents": (cmd_agents, "查看本机 AI 助手是否接入；--write 写入同一套密钥规则"),
-    "agent-rules": (cmd_agent_rules, "输出给 AI 助手的规则，贴进其他助手的全局说明"),
-    "backup": (cmd_backup, "加密备份成带密码的磁盘映像"),
-    "restore": (cmd_restore, "从备份恢复：key restore 文件.dmg"),
-    "edit": (cmd_edit, "直接打开密钥文件编辑"),
+    "init": (cmd_init, T("第一次使用：建好密钥文件、接好终端、生成本机说明",
+                         "First-time setup: create the secrets file, wire up the shell, write the local guide")),
+    "add": (cmd_add, T("录入或换新（值取自剪贴板）：key add 名字 [--kind config --group 主条目] [--meta 字段=值]…",
+                       "Add or replace (value from clipboard): key add NAME [--kind config --group PARENT] [--meta field=value]...")),
+    "ls": (cmd_ls, T("列出全部条目，配置挂在所属密钥下面，不显示密钥值：key ls [关键词] [--json]",
+                     "List all entries, config nested under its key, secrets masked: key ls [KEYWORD] [--json]")),
+    "get": (cmd_get, T("取值给脚本或应用用：key get 名字", "Print a value for scripts or apps: key get NAME")),
+    "run": (cmd_run, T("只把指定条目交给一个命令：key run 名字… -- 命令（--group 主条目 连同配置一起）",
+                       "Pass only the given entries to one command: key run NAME... -- COMMAND (--group PARENT includes its config)")),
+    "header": (cmd_header, T("给 HTTP 型 MCP 生成请求头：key header 名字", "Generate request headers for HTTP MCP servers: key header NAME")),
+    "copy": (cmd_copy, T("复制到剪贴板，45 秒后自动清空：key copy 名字", "Copy to clipboard, cleared after 45 seconds: key copy NAME")),
+    "set": (cmd_set, T("改说明：key set 名字 platform=… url=… account=… purpose=… kind=… group=… expires=…",
+                       "Edit notes: key set NAME platform=... url=... account=... purpose=... kind=... group=... expires=...")),
+    "del": (cmd_del, T("删除：key del 名字", "Delete: key del NAME")),
+    "scan": (cmd_scan, T("找散落在 shell 配置、AI 工具配置、.env 里的明文密钥：key scan [文件或目录…]",
+                         "Find plaintext keys in shell configs, AI tool configs and .env files: key scan [FILE_OR_DIR...]")),
+    "import": (cmd_import, T("把别处的明文收进来（值不经过屏幕）：key import 文件 变量名 [--as 新名字]",
+                             "Bring in a plaintext key from elsewhere (value never shown): key import FILE VAR [--as NEW_NAME]")),
+    "catalog": (cmd_catalog, T("认识的平台目录：录入时按名字自动补平台、网址、分类：key catalog [关键词] [--json]",
+                               "Known platforms, used to fill in platform, url and section by name: key catalog [KEYWORD] [--json]")),
+    "check": (cmd_check, T("体检：到期、重复、明文副本、终端接线、备份、AI 接入",
+                           "Health check: expiry, duplicates, plaintext copies, shell wiring, backup, AI assistants")),
+    "agents": (cmd_agents, T("查看本机 AI 助手是否接入；--write 写入同一套密钥规则",
+                             "Show which AI assistants on this Mac are connected; --write adds the shared key rules")),
+    "agent-rules": (cmd_agent_rules, T("输出给 AI 助手的规则，贴进其他助手的全局说明",
+                                       "Print the AI assistant rules, to paste into other assistants' global instructions")),
+    "backup": (cmd_backup, T("加密备份成带密码的磁盘映像", "Back up to an encrypted, password-protected disk image")),
+    "restore": (cmd_restore, T("从备份恢复：key restore 文件.dmg", "Restore from a backup: key restore FILE.dmg")),
+    "edit": (cmd_edit, T("直接打开密钥文件编辑", "Open the secrets file in an editor")),
 }
 
 
@@ -1102,17 +1434,17 @@ def main():
         if len(sys.argv) > 2 and sys.argv[2] == "mcp":
             print(HELP_MCP)
             return
-        print(f"key {VERSION}：API 密钥小工具。密钥文件：{short(KEYS)}")
+        print(T(f"key {VERSION}：API 密钥小工具。密钥文件：{short(KEYS)}", f"key {VERSION}: a small API key manager. Secrets file: {short(KEYS)}"))
         for c, (_, d) in COMMANDS.items():
             print(f"  {c:<12}{d}")
-        print("\n  key help mcp  怎么给 MCP 服务配密钥")
+        print(T("\n  key help mcp  怎么给 MCP 服务配密钥", "\n  key help mcp  how to configure keys for MCP servers"))
         return
     if sys.argv[1] in ("--version", "version"):
         print(VERSION)
         return
     c = sys.argv[1]
     if c not in COMMANDS:
-        die(f"没有 {c} 这个命令，运行 key 看全部命令")
+        die(T(f"没有 {c} 这个命令，运行 key 看全部命令", f"Unknown command {c}; run key to see all commands"))
     COMMANDS[c][0](sys.argv[2:])
 
 

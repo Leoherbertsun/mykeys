@@ -9,8 +9,11 @@ final class KeyStore: ObservableObject {
     @Published var isLoading = false
     /// 底部状态栏里的一句话提示，几秒后自动消失
     @Published var toast: String?
+    /// 命令行 key catalog --json 给出的平台目录，添加表单按名字自动补全时用；第一次需要时加载
+    @Published private(set) var catalog: KeyCatalog?
 
     private var toastTask: Task<Void, Never>?
+    private var catalogRequested = false
 
     var sections: [String] {
         var seen: [String] = []
@@ -46,8 +49,18 @@ final class KeyStore: ObservableObject {
             items = try JSONDecoder().decode([KeyItem].self, from: Data(r.out.utf8))
             loadError = nil
         } catch {
-            loadError = "读不懂 key 的输出（可能需要更新命令行工具 key）：\(error.localizedDescription)"
+            loadError = L("读不懂 key 的输出（可能需要更新命令行工具 key）：\(error.localizedDescription)",
+                          "Couldn't read the output of key (the command-line tool may need updating): \(error.localizedDescription)")
         }
+    }
+
+    /// 加载一次平台目录并缓存。旧版 key 没有这个命令时就不自动补全，不报错
+    func loadCatalog() async {
+        guard !catalogRequested else { return }
+        catalogRequested = true
+        let r = await KeyCLI.run(["catalog", "--json"])
+        guard r.ok, let c = try? JSONDecoder().decode(KeyCatalog.self, from: Data(r.out.utf8)) else { return }
+        catalog = c
     }
 
     func show(_ text: String) {
@@ -68,7 +81,7 @@ final class KeyStore: ObservableObject {
 
     func copy(_ name: String) async {
         let r = await KeyCLI.run(["copy", name])
-        show(r.ok ? "已复制 \(name)，45 秒后自动清空剪贴板" : r.message)
+        show(r.ok ? L("已复制 \(name)，45 秒后自动清空剪贴板", "Copied \(name). The clipboard clears in 45 seconds.") : r.message)
         await reload()
     }
 
@@ -77,7 +90,7 @@ final class KeyStore: ObservableObject {
         guard !changes.isEmpty else { return true }
         let args = ["set", name] + changes.map { "\($0.key)=\($0.value)" }
         let r = await KeyCLI.run(args)
-        show(r.ok ? "已保存 \(name) 的说明" : r.message)
+        show(r.ok ? L("已保存 \(name) 的说明", "Saved details for \(name)") : r.message)
         await reload()
         return r.ok
     }
@@ -85,10 +98,12 @@ final class KeyStore: ObservableObject {
     /// 录入新密钥或给已有的换新值。成功返回 nil，失败返回错误信息
     func add(name: String, value: String, section: String?, meta: [String: String]) async -> String? {
         var args = ["add", name, "--stdin"]
-        if let s = section, !s.isEmpty, s != "未分类" { args += ["--section", s] }
+        if let s = section, !s.isEmpty, s != KeyItem.uncategorized { args += ["--section", s] }
         for (k, v) in meta where !v.trimmingCharacters(in: .whitespaces).isEmpty {
             args += ["--meta", "\(k)=\(v)"]
         }
+        // 保存前就有这个名字，说明是换新值（不靠命令行输出的文字判断，它可能是任一种语言）
+        let existed = items.contains { $0.name == name }
         let r = await KeyCLI.run(args, stdin: value)
         await reload()
         if r.ok {
@@ -97,22 +112,55 @@ final class KeyStore: ObservableObject {
             if pb.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) == value.trimmingCharacters(in: .whitespacesAndNewlines) {
                 pb.clearContents()
             }
-            show(r.out.contains("换成新值") ? "\(name) 已换成新值" : "\(name) 已存好")
+            show(existed ? L("\(name) 已换成新值", "Updated \(name) with the new value") : L("\(name) 已存好", "Saved \(name)"))
             return nil
         }
-        return r.message.replacingOccurrences(of: "确认没错就加 --force", with: "请检查是不是复制错了")
+        return Self.dropForceHint(r.message)
+    }
+
+    /// 命令行拦下可疑的值时会提示“确认没错就加 --force”，App 里没有这个开关：把含 --force 的那一句换成检查提示
+    static func dropForceHint(_ message: String) -> String {
+        guard let hit = message.range(of: "--force") else { return message }
+        // 句子开头：往前找最近的句末标点（中文句号、分号、换行，或英文句号/分号后跟空格）
+        var start = message.startIndex
+        for sep in ["。", "；", "\n", ". ", "; ", "! "] {
+            if let r = message.range(of: sep, options: .backwards, range: message.startIndex..<hit.lowerBound),
+               r.upperBound > start {
+                start = r.upperBound
+            }
+        }
+        // 句子结尾：往后找最近的句末标点，找不到就到结尾
+        var end = message.endIndex
+        for sep in ["。", "；", "\n", ". ", "; "] {
+            if let r = message.range(of: sep, range: hit.upperBound..<message.endIndex), r.upperBound < end {
+                end = r.upperBound
+            }
+        }
+        var rest = message
+        rest.removeSubrange(start..<end)
+        rest = rest.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hint = L("请检查是不是复制错了", "Check that you copied the right value.")
+        if rest.isEmpty { return hint }
+        // 按剩下那句话自己的标点接上，不管它是哪种语言
+        switch rest.last {
+        case "。", "！", "？": return rest + hint
+        case ".", "!", "?": return rest + " " + hint
+        default: return rest + (Lang.isChinese ? "。" : ". ") + hint
+        }
     }
 
     func delete(_ name: String) async {
         let r = await KeyCLI.run(["del", name])
-        show(r.ok ? "\(name) 已删除（旧值留在本地快照里）" : r.message)
+        show(r.ok ? L("\(name) 已删除（旧值留在本地快照里）", "Deleted \(name). The old value is kept in a local snapshot.") : r.message)
         await reload()
     }
 
     func backupNow() async {
-        show("正在备份到 iCloud……")
+        show(L("正在备份到 iCloud……", "Backing up to iCloud…"))
         let r = await KeyCLI.run(["backup"])
-        show(r.ok ? "已备份到 iCloud 云盘「个人/密钥备份」" : r.message)
+        // 备份位置可在 config.json 里改，成功时直接用 key 自己报的那一行（写明了备份到哪里）
+        let reported = r.out.split(separator: "\n").last { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        show(r.ok ? reported.map { $0.trimmingCharacters(in: .whitespaces) } ?? L("已备份到 iCloud", "Backed up to iCloud") : r.message)
     }
 
     var keysFilePath: String {
@@ -155,13 +203,14 @@ final class AppLock: ObservableObject {
 
     func unlock() {
         let ctx = LAContext()
-        ctx.localizedCancelTitle = "取消"
+        ctx.localizedCancelTitle = L("取消", "Cancel")
         var err: NSError?
         guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &err) else {
-            lastError = "这台 Mac 没法验证身份：\(err?.localizedDescription ?? "")"
+            lastError = L("这台 Mac 没法验证身份：\(err?.localizedDescription ?? "")",
+                          "This Mac can't verify your identity: \(err?.localizedDescription ?? "")")
             return
         }
-        ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "查看你的 API 密钥") { ok, error in
+        ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: L("查看你的 API 密钥", "view your API keys")) { ok, error in
             Task { @MainActor in
                 if ok {
                     self.isUnlocked = true

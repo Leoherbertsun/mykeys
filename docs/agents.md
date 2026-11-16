@@ -27,7 +27,7 @@
 | Gemini CLI | `~/.gemini/GEMINI.md` |
 
 - 规则夹在 `<!-- mykeys:start -->` 和 `<!-- mykeys:end -->` 之间，再次运行只替换这一段，不动你写的其他内容。
-- 规则内容随 `key` 升级而更新：升级后再跑一次 `key agents --write` 即可。
+- 规则跟随系统语言（中文或英文），内容随 `key` 升级而更新：升级后再跑一次 `key agents --write` 即可。
 - 其他助手（Cursor、WorkBuddy、Trae……）：运行 `key agent-rules`，把输出贴进它的全局规则或“用户说明”。
 - `key` 同时生成 `~/.config/secrets/README.md`：本机的映射文档，写着东西在哪、接入了哪些助手、规则全文。任何助手不确定时都可以读它。
 
@@ -59,11 +59,10 @@ bearer_token_env_var = "EXAMPLE_TOKEN"
 用户说：“我复制了新的 Tavily 密钥，存成 TAVILY_API_KEY_5，这是第 5 个号。”AI 运行：
 
 ```bash
-key add TAVILY_API_KEY_5 --section 搜索 --meta platform=Tavily \
-  --meta url=https://app.tavily.com --meta account='第 5 个号' --meta tags=免费额度
+key add TAVILY_API_KEY_5 --meta account='第 5 个号' --meta tags=免费额度
 ```
 
-值从剪贴板直接进文件，剪贴板随即清空；AI 和聊天记录里都只有打码后的值。
+平台、网址、分类由内置目录自动补上。值从剪贴板直接进文件，剪贴板随即清空；AI 和聊天记录里都只有打码后的值。
 
 ## 网页里必须粘贴密钥时
 
